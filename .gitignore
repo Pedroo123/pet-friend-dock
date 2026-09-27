@@ -1,0 +1,9 @@
+# Ignorar arquivos ocultos do sistema
+.DS_Store
+Thumbs.db
+
+# Ignorar logs e arquivos de backup do editor
+*.log
+*~
+.vscode/
+.idea/

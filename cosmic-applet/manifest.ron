@@ -1,0 +1,7 @@
+(
+    uuid: "com.pedrobranks.desktop_pet",
+    name: "Desktop Pet",
+    description: "Um animalzinho interativo que reage à CPU e mostra lembretes.",
+    icon: "utilities-terminal",
+    category: "System",
+)
