@@ -4,12 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Bibliotecas oficiais do ecossistema COSMIC da System76
-cosmic-applet = { git = "https://github.com" }
-libcosmic = { git = "https://github.com", features = ["image"] }
-
-# Ferramentas assíncronas e manipulação de JSON
+# Dependencies for COSMIC applet and async json IPC
 tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-iced = { version = "0.10", features = ["tokio"] }
