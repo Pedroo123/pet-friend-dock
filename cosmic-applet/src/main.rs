@@ -98,8 +98,8 @@ fn main() {
 
     println!("Everything set up on COSMIC, Waiting on pet data....");
 
-    // Process initial incoming status messages
-    if let Ok(status) = rx.try_recv() {
+    // Continuous loop listening for incoming status updates
+    while let Some(status) = rx.blocking_recv() {
         applet.handle_update(status);
         println!("{}", applet.render_dock_widget());
     }
