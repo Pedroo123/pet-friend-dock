@@ -7,3 +7,15 @@ Thumbs.db
 *~
 .vscode/
 .idea/
+
+# Rust build artifacts
+target/
+cosmic-applet/target/
+
+# Python / Virtual Environment / Cache
+__pycache__/
+*.pyc
+.venv/
+bin/
+lib/
+lib64/
