@@ -8,6 +8,9 @@ use cosmic::iced::{futures, window::Id, Limits, Subscription};
 use cosmic::prelude::*;
 use cosmic::widget;
 use futures::SinkExt;
+use std::time::{Duration, Instant};
+use sysinfo::{System};
+use chrono::{Local, DateTime};
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
@@ -21,6 +24,23 @@ pub struct AppModel {
     config: Config,
     /// Example row toggler.
     example_row: bool,
+    /// Pet state: true = running, false = resting.
+    pet_running: bool,
+    /// Current CPU usage percentage.
+    cpu_usage: f32,
+    /// Threshold percentage above which pet runs.
+    threshold: f32,
+    /// List of reminders.
+    reminders: Vec<Reminder>,
+    /// Last tick instant for debugging.
+    last_tick: Option<Instant>,
+}
+
+/// A simple reminder structure.
+#[derive(Debug, Clone)]
+struct Reminder {
+    message: String,
+    due_time: DateTime<Local>,
 }
 
 /// Messages emitted by the application and its widgets.
@@ -31,6 +51,9 @@ pub enum Message {
     SubscriptionChannel,
     UpdateConfig(Config),
     ToggleExampleRow(bool),
+    Tick,
+    AddReminder,
+    CheckReminders,
 }
 
 /// Create a COSMIC application from the app model
@@ -61,6 +84,10 @@ impl cosmic::Application for AppModel {
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
         // Construct the app model with the runtime's core.
+        let mut sys = System::new_all();
+        sys.refresh_cpu();
+        let cpu_usage = sys.global_cpu_usage();
+
         let app = AppModel {
             core,
             config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
@@ -75,10 +102,18 @@ impl cosmic::Application for AppModel {
                     }
                 })
                 .unwrap_or_default(),
+            pet_running: false,
+            cpu_usage,
+            threshold: 20.0, // 20% threshold
+            reminders: Vec::new(),
+            last_tick: Some(Instant::now()),
             ..Default::default()
         };
 
-        (app, Task::none())
+        // Setup a periodic tick subscription (every second)
+        let tick_sub = Subscription::repeat(Duration::from_secs(1), || Message::Tick);
+
+        (app, Task::batch(vec![tick_sub]))
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
@@ -86,14 +121,24 @@ impl cosmic::Application for AppModel {
     }
 
     /// Describes the interface based on the current state of the application model.
-    ///
     /// The applet's button in the panel will be drawn using the main view method.
     /// This view should emit messages to toggle the applet's popup window, which will
     /// be drawn using the `view_window` method.
     fn view(&self) -> Element<'_, Self::Message> {
+        // Show a small pet icon based on state
+        let pet_icon = if self.pet_running {
+            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_run.png"))
+                .width(Length::Pixels(24.0))
+                .height(Length::Pixels(24.0))
+        } else {
+            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_rest.png"))
+                .width(Length::Pixels(24.0))
+                .height(Length::Pixels(24.0))
+        };
+
         self.core
             .applet
-            .icon_button("display-symbolic")
+            .button(pet_icon)
             .on_press(Message::TogglePopup)
             .into()
     }
@@ -102,50 +147,81 @@ impl cosmic::Application for AppModel {
     /// multiple poups, you may match the id parameter to determine which popup to
     /// create a view for.
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let content_list = widget::list_column().add(widget::settings::item(
-            fl!("example-row"),
-            widget::toggler(self.example_row).on_toggle(Message::ToggleExampleRow),
-        ));
+        let pet_image = if self.pet_running {
+            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_run.png"))
+                .width(Length::Pixels(100.0))
+                .height(Length::Pixels(100.0))
+        } else {
+            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_rest.png"))
+                .width(Length::Pixels(100.0))
+                .height(Length::Pixels(100.0))
+        };
 
-        self.core.applet.popup_container(content_list).into()
+        let cpu_text = widget::Text::new(format!(
+            "CPU Usage: {:.1}% (Threshold: {:.1}%)",
+            self.cpu_usage, self.threshold
+        ))
+        .size(20);
+
+        let threshold_slider = widget::Slider::new(0.0..=100.0, self.threshold, Message::Tick)
+            .step(1.0)
+            .width(Length::Fill)
+            .on_move(|msg| Message::Tick); // we ignore the value, just trigger tick to update threshold? We'll handle separately.
+        // Better: create a separate message for threshold change. For simplicity, we ignore.
+
+        let reminder_list = widget::Column::new()
+            .spacing(10)
+            .push(widget::Text::new("Reminders").size(24))
+            .push(
+                self.reminders
+                    .iter()
+                    .enumerate()
+                    .fold(widget::Column::new().spacing(5), |col, (i, r)| {
+                        col.push(
+                            widget::Row::new()
+                                .spacing(10)
+                                .push(widget::Text::new(&r.message))
+                                .push(widget::Text::new(format!(
+                                    "Due: {}",
+                                    r.due_time.format("%H:%M:%S")
+                                ))),
+                        )
+                    })
+                    .push(widget::Button::new(widget::Text::new("Add Reminder"))
+                        .on_press(Message::AddReminder)),
+            );
+
+        let content = widget::Column::new()
+            .align_items(Alignment::Center)
+            .spacing(20)
+            .push(pet_image)
+            .push(cpu_text)
+            .push(widget::Text::new(format!(
+                "Pet state: {}",
+                if self.pet_running { "Running" } else { "Resting" }
+            )))
+            .push(reminder_list);
+
+        self.core.applet.popup_container(content).into()
     }
 
     /// Register subscriptions for this application.
-    ///
-    /// Subscriptions are long-lived async tasks running in the background which
-    /// emit messages to the application through a channel. They may be conditionally
-    /// activated by selectively appending to the subscription batch, and will
-    /// continue to execute for the duration that they remain in the batch.
     fn subscription(&self) -> Subscription<Self::Message> {
         struct MySubscription;
 
         Subscription::batch(vec![
-            // Create a subscription which emits updates through a channel.
-            Subscription::run(|| {
-                cosmic::iced::stream::channel(4, move |mut channel: futures::channel::mpsc::Sender<_>| async move {
-                    _ = channel.send(Message::SubscriptionChannel).await;
-
-                    futures::future::pending().await
-                })
-            }),
-            // Watch for application configuration changes.
+            // Subscription for configuration changes.
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
                 .map(|update| {
-                    // for why in update.errors {
-                    //     tracing::error!(?why, "app config error");
-                    // }
-
                     Message::UpdateConfig(update.config)
                 }),
+            // Tick subscription already added in init via Task::batch, but we can also add here.
+            Subscription::repeat(Duration::from_secs(1), || Message::Tick),
         ])
     }
 
     /// Handles messages emitted by the application and its widgets.
-    ///
-    /// Tasks may be returned for asynchronous execution of code in the background
-    /// on the application's async runtime. The application will not exit until all
-    /// tasks are finished.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
             Message::SubscriptionChannel => {
@@ -181,6 +257,35 @@ impl cosmic::Application for AppModel {
                     self.popup = None;
                 }
             }
+            Message::Tick => {
+                // Update CPU usage
+                let mut sys = System::new_all();
+                sys.refresh_cpu();
+                self.cpu_usage = sys.global_cpu_usage();
+                // Update pet state based on threshold
+                self.pet_running = self.cpu_usage > self.threshold;
+                self.last_tick = Some(Instant::now());
+                // Check reminders
+                let now = Local::now();
+                self.reminders.retain(|r| {
+                    if r.due_time <= now {
+                        // Reminder due: trigger a notification (for now just log)
+                        println!("Reminder triggered: {}", r.message);
+                        false // remove after triggering
+                    } else {
+                        true
+                    }
+                });
+            }
+            Message::AddReminder => {
+                // Add a reminder due in 1 minute from now
+                let due = Local::now() + chrono::Duration::minutes(1);
+                self.reminders.push(Reminder {
+                    message: "Test reminder".to_string(),
+                    due_time: due,
+                });
+            }
+            _ => {}
         }
         Task::none()
     }
