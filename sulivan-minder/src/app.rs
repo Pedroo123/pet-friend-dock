@@ -2,19 +2,25 @@
 
 use crate::config::Config;
 use crate::fl;
+use crate::tracker::cpu_tracker::{self, CpuTracker};
+use chrono::{DateTime, Local, TimeZone};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
-use cosmic::iced::{futures, window::Id, Limits, Subscription};
+use cosmic::iced::{Alignment, Length, Limits, Subscription, window::Id};
 use cosmic::prelude::*;
 use cosmic::widget;
-use futures::SinkExt;
-use std::time::{Duration, Instant};
-use sysinfo::{System};
-use chrono::{Local, DateTime};
+use std::time::Duration;
+
+const PET_REST: &[u8] = include_bytes!("../resources/pet_rest.png");
+const PET_RUN: &[u8] = include_bytes!("../resources/pet_run.png");
+
+const CPU_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(250);
+const REMINDER_INTERVAL: Duration = Duration::from_secs(1);
+const DEFAULT_REMINDER_MINUTES: i64 = 5;
 
 /// The application model stores app-specific state used to describe its interface and
 /// drive its logic.
-#[derive(Default)]
 pub struct AppModel {
     /// Application state which is managed by the COSMIC runtime.
     core: cosmic::Core,
@@ -22,25 +28,46 @@ pub struct AppModel {
     popup: Option<Id>,
     /// Configuration data that persists between application runs.
     config: Config,
-    /// Example row toggler.
-    example_row: bool,
-    /// Pet state: true = running, false = resting.
-    pet_running: bool,
-    /// Current CPU usage percentage.
+    /// Handle used to persist the configuration.
+    config_handler: Option<cosmic_config::Config>,
+    /// Samples the CPU load.
+    tracker: CpuTracker,
+    /// Whether a CPU sample is currently in flight.
+    sampling: bool,
+    /// Latest CPU usage percentage.
     cpu_usage: f32,
-    /// Threshold percentage above which pet runs.
-    threshold: f32,
-    /// List of reminders.
-    reminders: Vec<Reminder>,
-    /// Last tick instant for debugging.
-    last_tick: Option<Instant>,
+    /// True while the CPU usage is above the configured threshold.
+    pet_running: bool,
+    /// Animation frame counter.
+    frame: bool,
+    /// Reminders whose time has passed and that were not dismissed yet.
+    due: Vec<Reminder>,
+    /// Text of the reminder being typed.
+    new_message: String,
+    /// Minutes of the reminder being typed.
+    new_minutes: String,
+    rest_handle: widget::image::Handle,
+    run_handle: widget::image::Handle,
 }
 
-/// A simple reminder structure.
-#[derive(Debug, Clone)]
+/// A saved reminder.
+#[derive(Debug, Clone, PartialEq)]
 struct Reminder {
     message: String,
     due_time: DateTime<Local>,
+}
+
+impl Reminder {
+    fn from_config(&(timestamp, ref message): &(i64, String)) -> Option<Self> {
+        Some(Self {
+            message: message.clone(),
+            due_time: Local.timestamp_opt(timestamp, 0).single()?,
+        })
+    }
+
+    fn to_config(&self) -> (i64, String) {
+        (self.due_time.timestamp(), self.message.clone())
+    }
 }
 
 /// Messages emitted by the application and its widgets.
@@ -48,12 +75,71 @@ struct Reminder {
 pub enum Message {
     TogglePopup,
     PopupClosed(Id),
-    SubscriptionChannel,
     UpdateConfig(Config),
-    ToggleExampleRow(bool),
-    Tick,
-    AddReminder,
+    /// Time to sample the CPU.
+    PollCpu,
+    /// A CPU sample finished.
+    CpuSampled(f32),
+    /// Advance the sprite animation.
+    Animate,
+    /// Look for reminders that became due.
     CheckReminders,
+    ReminderTextChanged(String),
+    ReminderMinutesChanged(String),
+    AddReminder,
+    RemoveReminder(usize),
+    DismissDue(usize),
+}
+
+impl AppModel {
+    fn reminders(&self) -> Vec<Reminder> {
+        self.config
+            .reminders
+            .iter()
+            .filter_map(Reminder::from_config)
+            .collect()
+    }
+
+    fn save_reminders(&mut self, reminders: Vec<(i64, String)>) {
+        match &self.config_handler {
+            Some(handler) => {
+                if let Err(why) = self.config.set_reminders(handler, reminders) {
+                    eprintln!("failed to save reminders: {why}");
+                }
+            }
+            None => self.config.reminders = reminders,
+        }
+    }
+
+    fn open_popup(&mut self) -> Task<cosmic::Action<Message>> {
+        let new_id = Id::unique();
+        self.popup.replace(new_id);
+        let mut popup_settings = self.core.applet.get_popup_settings(
+            self.core.main_window_id().unwrap(),
+            new_id,
+            None,
+            None,
+            None,
+        );
+        popup_settings.positioner.size_limits = Limits::NONE
+            .max_width(372.0)
+            .min_width(300.0)
+            .min_height(200.0)
+            .max_height(1080.0);
+        get_popup(popup_settings)
+    }
+
+    fn sprite(&self, size: f32) -> Element<'_, Message> {
+        let handle = if self.pet_running && self.frame {
+            &self.run_handle
+        } else {
+            &self.rest_handle
+        };
+        widget::image(handle.clone())
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .into()
+    }
 }
 
 /// Create a COSMIC application from the app model
@@ -83,209 +169,248 @@ impl cosmic::Application for AppModel {
         core: cosmic::Core,
         _flags: Self::Flags,
     ) -> (Self, Task<cosmic::Action<Self::Message>>) {
-        // Construct the app model with the runtime's core.
-        let mut sys = System::new_all();
-        sys.refresh_cpu();
-        let cpu_usage = sys.global_cpu_usage();
+        let config_handler = cosmic_config::Config::new(Self::APP_ID, Config::VERSION).ok();
+        let config = config_handler
+            .as_ref()
+            .map(|context| match Config::get_entry(context) {
+                Ok(config) => config,
+                Err((_errors, config)) => config,
+            })
+            .unwrap_or_default();
 
         let app = AppModel {
             core,
-            config: cosmic_config::Config::new(Self::APP_ID, Config::VERSION)
-                .map(|context| match Config::get_entry(&context) {
-                    Ok(config) => config,
-                    Err((_errors, config)) => {
-                        // for why in errors {
-                        //     tracing::error!(%why, "error loading app config");
-                        // }
-
-                        config
-                    }
-                })
-                .unwrap_or_default(),
+            popup: None,
+            config,
+            config_handler,
+            tracker: CpuTracker::default(),
+            sampling: false,
+            cpu_usage: 0.0,
             pet_running: false,
-            cpu_usage,
-            threshold: 20.0, // 20% threshold
-            reminders: Vec::new(),
-            last_tick: Some(Instant::now()),
-            ..Default::default()
+            frame: false,
+            due: Vec::new(),
+            new_message: String::new(),
+            new_minutes: DEFAULT_REMINDER_MINUTES.to_string(),
+            rest_handle: widget::image::Handle::from_bytes(PET_REST),
+            run_handle: widget::image::Handle::from_bytes(PET_RUN),
         };
 
-        // Setup a periodic tick subscription (every second)
-        let tick_sub = Subscription::repeat(Duration::from_secs(1), || Message::Tick);
-
-        (app, Task::batch(vec![tick_sub]))
+        (app, Task::none())
     }
 
     fn on_close_requested(&self, id: Id) -> Option<Message> {
         Some(Message::PopupClosed(id))
     }
 
-    /// Describes the interface based on the current state of the application model.
-    /// The applet's button in the panel will be drawn using the main view method.
-    /// This view should emit messages to toggle the applet's popup window, which will
-    /// be drawn using the `view_window` method.
+    /// The applet's button in the panel shows the animated pet.
     fn view(&self) -> Element<'_, Self::Message> {
-        // Show a small pet icon based on state
-        let pet_icon = if self.pet_running {
-            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_run.png"))
-                .width(Length::Pixels(24.0))
-                .height(Length::Pixels(24.0))
-        } else {
-            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_rest.png"))
-                .width(Length::Pixels(24.0))
-                .height(Length::Pixels(24.0))
-        };
-
-        self.core
-            .applet
-            .button(pet_icon)
+        let size = self.core.applet.suggested_size(true).0 as f32;
+        widget::button::custom(self.sprite(size))
+            .padding(0)
+            .class(cosmic::theme::Button::AppletIcon)
             .on_press(Message::TogglePopup)
             .into()
     }
 
-    /// The applet's popup window will be drawn using this view method. If there are
-    /// multiple poups, you may match the id parameter to determine which popup to
-    /// create a view for.
+    /// The applet's popup: CPU status, due reminders and reminder management.
     fn view_window(&self, _id: Id) -> Element<'_, Self::Message> {
-        let pet_image = if self.pet_running {
-            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_run.png"))
-                .width(Length::Pixels(100.0))
-                .height(Length::Pixels(100.0))
+        let state = if self.pet_running {
+            fl!("pet-running")
         } else {
-            widget::Image::new(iced::widget::image::Handle::from_path("resources/pet_rest.png"))
-                .width(Length::Pixels(100.0))
-                .height(Length::Pixels(100.0))
+            fl!("pet-resting")
         };
 
-        let cpu_text = widget::Text::new(format!(
-            "CPU Usage: {:.1}% (Threshold: {:.1}%)",
-            self.cpu_usage, self.threshold
-        ))
-        .size(20);
+        let mut content = widget::Column::new()
+            .spacing(12)
+            .padding(12)
+            .align_x(Alignment::Center)
+            .push(self.sprite(100.0))
+            .push(widget::text::body(state))
+            .push(widget::text::body(fl!(
+                "cpu-usage",
+                usage = format!("{:.1}", self.cpu_usage),
+                threshold = format!("{:.0}", self.config.cpu_threshold)
+            )));
 
-        let threshold_slider = widget::Slider::new(0.0..=100.0, self.threshold, Message::Tick)
-            .step(1.0)
-            .width(Length::Fill)
-            .on_move(|msg| Message::Tick); // we ignore the value, just trigger tick to update threshold? We'll handle separately.
-        // Better: create a separate message for threshold change. For simplicity, we ignore.
+        if !self.due.is_empty() {
+            let mut due = widget::Column::new()
+                .spacing(6)
+                .push(widget::text::heading(fl!("due-reminders")));
+            for (i, reminder) in self.due.iter().enumerate() {
+                due = due.push(
+                    widget::Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(widget::text::body(reminder.message.clone()).width(Length::Fill))
+                        .push(
+                            widget::button::standard(fl!("dismiss"))
+                                .on_press(Message::DismissDue(i)),
+                        ),
+                );
+            }
+            content = content.push(due);
+        }
 
-        let reminder_list = widget::Column::new()
-            .spacing(10)
-            .push(widget::Text::new("Reminders").size(24))
-            .push(
-                self.reminders
-                    .iter()
-                    .enumerate()
-                    .fold(widget::Column::new().spacing(5), |col, (i, r)| {
-                        col.push(
-                            widget::Row::new()
-                                .spacing(10)
-                                .push(widget::Text::new(&r.message))
-                                .push(widget::Text::new(format!(
-                                    "Due: {}",
-                                    r.due_time.format("%H:%M:%S")
-                                ))),
-                        )
-                    })
-                    .push(widget::Button::new(widget::Text::new("Add Reminder"))
-                        .on_press(Message::AddReminder)),
+        let mut list = widget::Column::new()
+            .spacing(6)
+            .push(widget::text::heading(fl!("reminders")));
+        let reminders = self.reminders();
+        if reminders.is_empty() {
+            list = list.push(widget::text::caption(fl!("no-reminders")));
+        }
+        for (i, reminder) in reminders.iter().enumerate() {
+            list = list.push(
+                widget::Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        widget::text::body(format!(
+                            "{} – {}",
+                            reminder.due_time.format("%H:%M"),
+                            reminder.message
+                        ))
+                        .width(Length::Fill),
+                    )
+                    .push(
+                        widget::button::icon(widget::icon::from_name("edit-delete-symbolic"))
+                            .on_press(Message::RemoveReminder(i)),
+                    ),
             );
+        }
+        content = content.push(list);
 
-        let content = widget::Column::new()
-            .align_items(Alignment::Center)
-            .spacing(20)
-            .push(pet_image)
-            .push(cpu_text)
-            .push(widget::Text::new(format!(
-                "Pet state: {}",
-                if self.pet_running { "Running" } else { "Resting" }
-            )))
-            .push(reminder_list);
+        let form = widget::Row::new()
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .push(
+                widget::text_input(fl!("reminder-placeholder"), &self.new_message)
+                    .on_input(Message::ReminderTextChanged)
+                    .on_submit(|_| Message::AddReminder)
+                    .width(Length::Fill),
+            )
+            .push(
+                widget::text_input(fl!("minutes-placeholder"), &self.new_minutes)
+                    .on_input(Message::ReminderMinutesChanged)
+                    .on_submit(|_| Message::AddReminder)
+                    .width(Length::Fixed(80.0)),
+            );
+        content = content
+            .push(form)
+            .push(widget::button::suggested(fl!("add-reminder")).on_press(Message::AddReminder));
 
         self.core.applet.popup_container(content).into()
     }
 
     /// Register subscriptions for this application.
     fn subscription(&self) -> Subscription<Self::Message> {
-        struct MySubscription;
-
-        Subscription::batch(vec![
-            // Subscription for configuration changes.
+        let mut subscriptions = vec![
+            // Watch for application configuration changes.
             self.core()
                 .watch_config::<Config>(Self::APP_ID)
-                .map(|update| {
-                    Message::UpdateConfig(update.config)
-                }),
-            // Tick subscription already added in init via Task::batch, but we can also add here.
-            Subscription::repeat(Duration::from_secs(1), || Message::Tick),
-        ])
+                .map(|update| Message::UpdateConfig(update.config)),
+            cosmic::iced::time::every(CPU_POLL_INTERVAL).map(|_| Message::PollCpu),
+            cosmic::iced::time::every(REMINDER_INTERVAL).map(|_| Message::CheckReminders),
+        ];
+        if self.pet_running {
+            subscriptions
+                .push(cosmic::iced::time::every(ANIMATION_INTERVAL).map(|_| Message::Animate));
+        }
+        Subscription::batch(subscriptions)
     }
 
     /// Handles messages emitted by the application and its widgets.
     fn update(&mut self, message: Self::Message) -> Task<cosmic::Action<Self::Message>> {
         match message {
-            Message::SubscriptionChannel => {
-                // For example purposes only.
-            }
             Message::UpdateConfig(config) => {
                 self.config = config;
+                self.pet_running =
+                    cpu_tracker::is_over_threshold(self.cpu_usage, self.config.cpu_threshold);
             }
-            Message::ToggleExampleRow(toggled) => self.example_row = toggled,
             Message::TogglePopup => {
                 return if let Some(p) = self.popup.take() {
                     destroy_popup(p)
                 } else {
-                    let new_id = Id::unique();
-                    self.popup.replace(new_id);
-                    let mut popup_settings = self.core.applet.get_popup_settings(
-                        self.core.main_window_id().unwrap(),
-                        new_id,
-                        None,
-                        None,
-                        None,
-                    );
-                    popup_settings.positioner.size_limits = Limits::NONE
-                        .max_width(372.0)
-                        .min_width(300.0)
-                        .min_height(200.0)
-                        .max_height(1080.0);
-                    get_popup(popup_settings)
-                }
+                    self.open_popup()
+                };
             }
             Message::PopupClosed(id) => {
                 if self.popup.as_ref() == Some(&id) {
                     self.popup = None;
                 }
             }
-            Message::Tick => {
-                // Update CPU usage
-                let mut sys = System::new_all();
-                sys.refresh_cpu();
-                self.cpu_usage = sys.global_cpu_usage();
-                // Update pet state based on threshold
-                self.pet_running = self.cpu_usage > self.threshold;
-                self.last_tick = Some(Instant::now());
-                // Check reminders
+            Message::PollCpu => {
+                if self.sampling {
+                    return Task::none();
+                }
+                self.sampling = true;
+                let tracker = self.tracker.clone();
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || tracker.sample())
+                            .await
+                            .unwrap_or(0.0)
+                    },
+                    |usage| cosmic::Action::App(Message::CpuSampled(usage)),
+                );
+            }
+            Message::CpuSampled(usage) => {
+                self.sampling = false;
+                self.cpu_usage = usage;
+                self.pet_running = cpu_tracker::is_over_threshold(usage, self.config.cpu_threshold);
+                if !self.pet_running {
+                    self.frame = false;
+                }
+            }
+            Message::Animate => self.frame = !self.frame,
+            Message::CheckReminders => {
                 let now = Local::now();
-                self.reminders.retain(|r| {
-                    if r.due_time <= now {
-                        // Reminder due: trigger a notification (for now just log)
-                        println!("Reminder triggered: {}", r.message);
-                        false // remove after triggering
-                    } else {
-                        true
-                    }
-                });
+                let (due, pending): (Vec<_>, Vec<_>) = self
+                    .reminders()
+                    .into_iter()
+                    .partition(|r| r.due_time <= now);
+                if due.is_empty() {
+                    return Task::none();
+                }
+                let pending = pending.iter().map(Reminder::to_config).collect();
+                self.save_reminders(pending);
+                self.due.extend(due);
+                if self.popup.is_none() {
+                    return self.open_popup();
+                }
             }
+            Message::ReminderTextChanged(text) => self.new_message = text,
+            Message::ReminderMinutesChanged(text) => self.new_minutes = text,
             Message::AddReminder => {
-                // Add a reminder due in 1 minute from now
-                let due = Local::now() + chrono::Duration::minutes(1);
-                self.reminders.push(Reminder {
-                    message: "Test reminder".to_string(),
-                    due_time: due,
-                });
+                let message = self.new_message.trim().to_string();
+                if message.is_empty() {
+                    return Task::none();
+                }
+                let minutes = self
+                    .new_minutes
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|m| *m >= 0)
+                    .unwrap_or(DEFAULT_REMINDER_MINUTES);
+                let due = Local::now() + chrono::Duration::minutes(minutes);
+                let mut reminders = self.config.reminders.clone();
+                reminders.push((due.timestamp(), message));
+                reminders.sort_by_key(|(timestamp, _)| *timestamp);
+                self.save_reminders(reminders);
+                self.new_message.clear();
             }
-            _ => {}
+            Message::RemoveReminder(index) => {
+                let mut reminders = self.config.reminders.clone();
+                if index < reminders.len() {
+                    reminders.remove(index);
+                    self.save_reminders(reminders);
+                }
+            }
+            Message::DismissDue(index) => {
+                if index < self.due.len() {
+                    self.due.remove(index);
+                }
+            }
         }
         Task::none()
     }
