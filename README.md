@@ -1,139 +1,81 @@
 # pet-friend-dock
 
-`pet-friend-dock` is an interactive desktop pet applet designed for the COSMIC desktop environment. The applet features a pixelated pet attached to your dock that reacts to system CPU usage and manages reminders/notifications.
+**Sulivan Minder** is a COSMIC desktop applet (Pop!_OS / COSMIC) written in Rust: a little dog that walks back and forth along your panel, runs when the CPU is busy, and pops up your reminders.
 
-The project combines a **Rust** frontend applet (`cosmic-applet`) and a **Python** backend tracker (`core/cpu_tracker.py`) communicating over standard asynchronous JSON IPC.
-
----
-
-## Table of Contents
-
-- [Features](#features)
-- [Project Architecture](#project-architecture)
-- [Prerequisites](#prerequisites)
-- [Building & Running Locally](#building--running-locally)
-  - [1. Setting Up Python Environment](#1-setting-up-python-environment)
-  - [2. Running Python Unit Tests](#2-running-python-unit-tests)
-  - [3. Building and Running the COSMIC Applet](#3-building-and-running-the-cosmic-applet)
-- [Contributing Guidelines](#contributing-guidelines)
-  - [Development Workflow](#development-workflow)
-  - [Coding Standards](#coding-standards)
-  - [Submitting Pull Requests](#submitting-pull-requests)
-- [License](#license)
-
----
+The applet lives in [`sulivan-minder/`](sulivan-minder/) and has no Python dependency.
 
 ## Features
 
-- **Interactive Pet States**: Pet behavior changes dynamically based on CPU load (RESTING when idle, RUNNING when busy, FAST_RUNNING under high load).
-- **Multiple Pets**: Select from various pixelated pet personas (Capybara, Panda, Red Fox, Penguin, Koala, Duck).
-- **Reminders & Notifications**: Set reminders and receive desktop notifications (`notify-send`).
-- **COSMIC Dock Integration**: Async IPC between Rust COSMIC applet and Python backend.
+- Animated dog sprites that walk along the dock and run faster when CPU usage is above a threshold (default 20%).
+- Click the pet to open a popup where you enter a reminder and how many minutes from now it should fire.
+- When a reminder is due, the popup opens and shows its message. Each reminder is one-shot: it is removed from the applet's own saved config when it fires. The system crontab is never touched.
+- Reminders and settings persist via `cosmic-config`.
 
----
-
-## Project Architecture
+## Layout
 
 ```text
-pet-friend-dock/
-├── core/
-│   └── cpu_tracker.py       # Python backend service tracking CPU and pet state
-├── cosmic-applet/
-│   ├── Cargo.toml           # Rust dependencies and package configuration
-│   ├── manifest.ron         # COSMIC applet manifest
-│   └── src/
-│       └── main.rs          # Rust COSMIC applet entrypoint & IPC interface
-├── tests/
-│   └── test_cpu_tracker.py  # Unit tests for the Python backend
-└── README.md                # Project documentation
+sulivan-minder/
+├── Cargo.toml / build.rs / justfile
+├── i18n/en/            # Fluent translations
+├── resources/          # desktop entry, metainfo, icon
+└── src/
+    ├── main.rs         # entrypoint
+    ├── app.rs          # AppModel: view, popup, subscriptions, reminders
+    ├── pet.rs          # movement/animation logic (unit tested)
+    ├── config.rs       # persisted config (cpu_threshold, reminders)
+    ├── tracker/        # CPU usage sampling
+    └── assets/         # dog sprites (64x64 PNG, facing left)
 ```
-
----
 
 ## Prerequisites
 
-Before building the project locally, ensure you have the following installed:
-
-- **Python**: Python 3.10+ and `pip`
-- **Rust & Cargo**: Rust toolchain (2021 edition)
-- **Optional / System Utilities**: `notify-send` (for desktop notification support on Linux/COSMIC)
-
----
-
-## Building & Running Locally
-
-### 1. Setting Up Python Environment
-
-Install the required Python dependencies (`psutil` is required by `cpu_tracker.py`):
+- Rust toolchain via [rustup](https://rustup.rs/) (edition 2024, so a recent stable)
+- [just](https://github.com/casey/just) (optional but recommended)
+- System development libraries. On Debian/Ubuntu/Pop!_OS:
 
 ```bash
-pip install psutil
+sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev \
+  libinput-dev libudev-dev libseat-dev libgbm-dev libegl1-mesa-dev \
+  libfontconfig-dev libfreetype-dev libssl-dev
 ```
 
-*(Optional)* You can also use a virtual environment:
+## Build and run
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install psutil
+cd sulivan-minder
+just build-release     # or: cargo build --release
+just install           # installs binary, desktop entry, metainfo and icon (uses sudo/prefix as needed)
 ```
 
-### 2. Running Python Unit Tests
+Then add the applet from **COSMIC Settings → Desktop → Panel/Dock → Applets**.
 
-Before compiling or running the Rust applet, ensure all backend unit tests pass:
+Running the binary directly (`just run` / `cargo run`) requires a running COSMIC panel session, since it is a panel applet. Use `just uninstall` to remove it.
 
-```bash
-python3 -m unittest discover -s tests
-```
+## Contributing
 
-### 3. Building and Running the COSMIC Applet
-
-Navigate to the `cosmic-applet` directory to build and run the Rust applet:
+1. Fork and clone the repository, then create a branch: `git checkout -b feature/my-change`.
+2. Make focused changes inside `sulivan-minder/`.
+3. Before opening a PR, run from `sulivan-minder/`:
 
 ```bash
-cd cosmic-applet
-
-# Verify/check code without producing binary
-cargo check
-
-# Build debug binary
+cargo fmt
+cargo test            # unit tests (pet movement, CPU threshold)
+just check            # clippy
 cargo build
-
-# Run the applet locally (spawns Python core automatically)
-cargo run
 ```
 
----
+4. Open a Pull Request against `main` describing the motivation, changes and how you tested them.
 
-## Contributing Guidelines
+Guidelines:
 
-We welcome contributions! To keep code maintainable and reliable, please follow these steps when contributing:
+- Keep UI updates non-blocking: do blocking work (such as `/proc` sampling) in `spawn_blocking` tasks, as `CpuTracker` does.
+- Keep pure logic (like `pet.rs`) free of UI types so it can be unit tested.
+- User-facing strings go in `i18n/en/sulivan_minder.ftl` and are used via `fl!()`. To add a language, copy `i18n/en` to a new ISO 639-1 directory and translate.
+- Do not modify or delete entries in the user's system crontab; reminders are app-managed.
+- To replace the sprites, keep four same-size PNG frames facing left and update the list in `app.rs`.
 
-### Development Workflow
-
-1. **Fork & Clone** the repository.
-2. **Create a Feature Branch**:
-   ```bash
-   git checkout -b feature/my-cool-feature
-   ```
-3. **Make Your Changes**: Keep changes focused and clear.
-4. **Run Tests**:
-   - Run Python unit tests: `python3 -m unittest discover -s tests`
-   - Check Rust code: `cd cosmic-applet && cargo check`
-5. **Commit Your Work**: Write descriptive, concise commit messages.
-
-### Coding Standards
-
-- **Python**: Follow PEP 8 guidelines. Write unit tests in `tests/` for any new logic added to `core/`.
-- **Rust**: Ensure code formats cleanly with `cargo fmt` and compiles without warnings (`cargo check`).
-
-### Submitting Pull Requests
-
-- Push your branch to your fork and submit a Pull Request against `main`.
-- Describe the motivation, changes made, and test steps performed in your PR description.
-
----
+See [`sulivan-minder/README.md`](sulivan-minder/README.md) for packaging and vendoring details.
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
+GPL-3.0. See [LICENSE](LICENSE).
