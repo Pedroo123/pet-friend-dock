@@ -5731,6 +5731,7 @@ dependencies = [
  "i18n-embed",
  "i18n-embed-fl",
  "iced 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "image",
  "libcosmic",
  "rust-embed",
  "sysinfo",

@@ -2,20 +2,29 @@
 
 use crate::config::Config;
 use crate::fl;
+use crate::pet::{Direction, FRAME_COUNT, Pet};
 use crate::tracker::cpu_tracker::{self, CpuTracker};
 use chrono::{DateTime, Local, TimeZone};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
-use cosmic::iced::{Alignment, Length, Limits, Subscription, window::Id};
+use cosmic::iced::{Alignment, Length, Limits, Padding, Subscription, window::Id};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
 
-const PET_REST: &[u8] = include_bytes!("../resources/pet_rest.png");
-const PET_RUN: &[u8] = include_bytes!("../resources/pet_run.png");
+/// Dog sprites facing left, in walk-cycle order.
+const SPRITES: [&[u8]; FRAME_COUNT] = [
+    include_bytes!("assets/goldenDefault_0002(3).png"),
+    include_bytes!("assets/goldenDefault_0003(2).png"),
+    include_bytes!("assets/goldenDefault_0004(1).png"),
+    include_bytes!("assets/goldenDefault_0005.png"),
+];
+
+/// How many sprite widths long the pet's walking track on the dock is.
+const TRACK_SPRITES: f32 = 5.0;
 
 const CPU_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const ANIMATION_INTERVAL: Duration = Duration::from_millis(250);
+const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
 const REMINDER_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_REMINDER_MINUTES: i64 = 5;
 
@@ -38,16 +47,34 @@ pub struct AppModel {
     cpu_usage: f32,
     /// True while the CPU usage is above the configured threshold.
     pet_running: bool,
-    /// Animation frame counter.
-    frame: bool,
+    /// Position and animation state of the pet.
+    pet: Pet,
     /// Reminders whose time has passed and that were not dismissed yet.
     due: Vec<Reminder>,
     /// Text of the reminder being typed.
     new_message: String,
     /// Minutes of the reminder being typed.
     new_minutes: String,
-    rest_handle: widget::image::Handle,
-    run_handle: widget::image::Handle,
+    /// Sprites facing left (the direction they were drawn in).
+    left_handles: Vec<widget::image::Handle>,
+    /// Horizontally mirrored sprites, used when walking right.
+    right_handles: Vec<widget::image::Handle>,
+}
+
+/// Loads the sprite as a handle, optionally mirrored horizontally.
+fn sprite_handle(bytes: &[u8], mirrored: bool) -> widget::image::Handle {
+    match image::load_from_memory(bytes) {
+        Ok(img) => {
+            let img = if mirrored { img.fliph() } else { img };
+            let rgba = img.into_rgba8();
+            let (width, height) = rgba.dimensions();
+            widget::image::Handle::from_rgba(width, height, rgba.into_raw())
+        }
+        Err(why) => {
+            eprintln!("failed to decode sprite: {why}");
+            widget::image::Handle::from_bytes(bytes.to_vec())
+        }
+    }
 }
 
 /// A saved reminder.
@@ -111,6 +138,14 @@ impl AppModel {
         }
     }
 
+    fn sprite_size(&self) -> f32 {
+        f32::from(self.core.applet.suggested_size(true).0)
+    }
+
+    fn track_length(&self) -> f32 {
+        self.sprite_size() * TRACK_SPRITES
+    }
+
     fn open_popup(&mut self) -> Task<cosmic::Action<Message>> {
         let new_id = Id::unique();
         self.popup.replace(new_id);
@@ -130,12 +165,11 @@ impl AppModel {
     }
 
     fn sprite(&self, size: f32) -> Element<'_, Message> {
-        let handle = if self.pet_running && self.frame {
-            &self.run_handle
-        } else {
-            &self.rest_handle
+        let handles = match self.pet.direction {
+            Direction::Forward => &self.right_handles,
+            Direction::Backward => &self.left_handles,
         };
-        widget::image(handle.clone())
+        widget::image(handles[self.pet.frame % FRAME_COUNT].clone())
             .width(Length::Fixed(size))
             .height(Length::Fixed(size))
             .into()
@@ -187,12 +221,12 @@ impl cosmic::Application for AppModel {
             sampling: false,
             cpu_usage: 0.0,
             pet_running: false,
-            frame: false,
+            pet: Pet::default(),
             due: Vec::new(),
             new_message: String::new(),
             new_minutes: DEFAULT_REMINDER_MINUTES.to_string(),
-            rest_handle: widget::image::Handle::from_bytes(PET_REST),
-            run_handle: widget::image::Handle::from_bytes(PET_RUN),
+            left_handles: SPRITES.iter().map(|b| sprite_handle(b, false)).collect(),
+            right_handles: SPRITES.iter().map(|b| sprite_handle(b, true)).collect(),
         };
 
         (app, Task::none())
@@ -204,12 +238,30 @@ impl cosmic::Application for AppModel {
 
     /// The applet's button in the panel shows the animated pet.
     fn view(&self) -> Element<'_, Self::Message> {
-        let size = self.core.applet.suggested_size(true).0 as f32;
-        widget::button::custom(self.sprite(size))
+        let size = self.sprite_size();
+        let button = widget::button::custom(self.sprite(size))
             .padding(0)
             .class(cosmic::theme::Button::AppletIcon)
-            .on_press(Message::TogglePopup)
-            .into()
+            .on_press(Message::TogglePopup);
+
+        // The pet walks along a track on the dock; its offset along the panel's main axis
+        // is the pet's current position.
+        let offset = self.pet.position;
+        let track = self.track_length();
+        let track_view: Element<'_, Message> = if self.core.applet.is_horizontal() {
+            widget::container(button)
+                .padding(Padding::ZERO.left(offset))
+                .width(Length::Fixed(track))
+                .height(Length::Fixed(size))
+                .into()
+        } else {
+            widget::container(button)
+                .padding(Padding::ZERO.top(offset))
+                .width(Length::Fixed(size))
+                .height(Length::Fixed(track))
+                .into()
+        };
+        self.core.applet.autosize_window(track_view).into()
     }
 
     /// The applet's popup: CPU status, due reminders and reminder management.
@@ -311,10 +363,7 @@ impl cosmic::Application for AppModel {
             cosmic::iced::time::every(CPU_POLL_INTERVAL).map(|_| Message::PollCpu),
             cosmic::iced::time::every(REMINDER_INTERVAL).map(|_| Message::CheckReminders),
         ];
-        if self.pet_running {
-            subscriptions
-                .push(cosmic::iced::time::every(ANIMATION_INTERVAL).map(|_| Message::Animate));
-        }
+        subscriptions.push(cosmic::iced::time::every(ANIMATION_INTERVAL).map(|_| Message::Animate));
         Subscription::batch(subscriptions)
     }
 
@@ -357,11 +406,16 @@ impl cosmic::Application for AppModel {
                 self.sampling = false;
                 self.cpu_usage = usage;
                 self.pet_running = cpu_tracker::is_over_threshold(usage, self.config.cpu_threshold);
-                if !self.pet_running {
-                    self.frame = false;
-                }
             }
-            Message::Animate => self.frame = !self.frame,
+            Message::Animate => {
+                let (track, size) = (self.track_length(), self.sprite_size());
+                self.pet.tick(
+                    ANIMATION_INTERVAL.as_secs_f32(),
+                    self.pet_running,
+                    track,
+                    size,
+                );
+            }
             Message::CheckReminders => {
                 let now = Local::now();
                 let (due, pending): (Vec<_>, Vec<_>) = self
