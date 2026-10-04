@@ -6,6 +6,7 @@ use crate::pet::{Direction, FRAME_COUNT, Pet};
 use crate::tracker::cpu_tracker::{self, CpuTracker};
 use chrono::{DateTime, Local, TimeZone};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
+use cosmic::cosmic_theme::palette::num::Round;
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
 use cosmic::iced::{Alignment, Length, Limits, Padding, Subscription, window::Id};
 use cosmic::prelude::*;
@@ -151,19 +152,32 @@ impl AppModel {
     fn open_popup(&mut self) -> Task<cosmic::Action<Message>> {
         let new_id = Id::unique();
         self.popup.replace(new_id);
-        let mut popup_settings = self.core.applet.get_popup_settings(
-            self.core.main_window_id().unwrap(),
-            new_id,
-            None,
-            None,
-            None,
-        );
-        popup_settings.positioner.size_limits = Limits::NONE
-            .max_width(372.0)
-            .min_width(300.0)
-            .min_height(200.0)
-            .max_height(1080.0);
-        get_popup(popup_settings)
+
+        let size = self.sprite_size();
+        let anchor_x = self.pet.position.round() as i32;
+        let anchor_y = 0;
+        let anchor_w = size.round() as i32;
+        let anchor_h = size.round() as i32;
+
+        let mut popup_settings = self
+            .core
+            .applet
+            .get_popup_settings(
+                self.core.main_window_id().unwrap(),
+                new_id,
+                None,
+                None,
+                None,
+            );
+        
+        popup_settings.positioner.anchor_rect = cosmic::iced::Rectangle {
+            x: anchor_x,
+            y: anchor_y,
+            width: anchor_w,
+            height: anchor_h,
+        };
+
+        get_popup(popup_settings);
     }
 
     fn sprite(&self, size: f32) -> Element<'_, Message> {
