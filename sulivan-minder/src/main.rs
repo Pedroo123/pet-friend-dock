@@ -3,6 +3,7 @@
 mod app;
 mod config;
 mod i18n;
+mod pet;
 mod tracker;
 
 fn main() -> cosmic::iced::Result {
