@@ -22,6 +22,8 @@ const SPRITES: [&[u8]; FRAME_COUNT] = [
 
 /// How many sprite widths long the pet's walking track on the dock is.
 const TRACK_SPRITES: f32 = 5.0;
+/// Scale the pet slightly above the panel's suggested applet icon size.
+const PET_SIZE_SCALE: f32 = 1.2;
 
 const CPU_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const ANIMATION_INTERVAL: Duration = Duration::from_millis(100);
@@ -139,7 +141,7 @@ impl AppModel {
     }
 
     fn sprite_size(&self) -> f32 {
-        f32::from(self.core.applet.suggested_size(true).0)
+        f32::from(self.core.applet.suggested_size(true).0) * PET_SIZE_SCALE
     }
 
     fn track_length(&self) -> f32 {
@@ -248,19 +250,11 @@ impl cosmic::Application for AppModel {
         // is the pet's current position.
         let offset = self.pet.position;
         let track = self.track_length();
-        let track_view: Element<'_, Message> = if self.core.applet.is_horizontal() {
-            widget::container(button)
-                .padding(Padding::ZERO.left(offset))
-                .width(Length::Fixed(track))
-                .height(Length::Fixed(size))
-                .into()
-        } else {
-            widget::container(button)
-                .padding(Padding::ZERO.top(offset))
-                .width(Length::Fixed(size))
-                .height(Length::Fixed(track))
-                .into()
-        };
+        let track_view: Element<'_, Message> = widget::container(button)
+            .padding(Padding::ZERO.left(offset))
+            .width(Length::Fixed(track))
+            .height(Length::Fixed(size))
+            .into();
         self.core.applet.autosize_window(track_view).into()
     }
 
