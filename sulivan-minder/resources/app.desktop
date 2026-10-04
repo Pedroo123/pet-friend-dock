@@ -1,0 +1,14 @@
+[Desktop Entry]
+Name=Sulivan Minder
+Comment=A little pet that attaches to your dock, run around and remind you of your stuff
+Type=Application
+Icon=com.github.pedroo123.sulivanMinder
+Exec=sulivan-minder %F
+Terminal=false
+StartupNotify=true
+Categories=COSMIC
+Keywords=COSMIC
+NoDisplay=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+MimeType=

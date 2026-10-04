@@ -1,0 +1,9 @@
+app-title = Sulivan Minder
+app-comment = A little pet that attaches to your dock, run around and remind you of your stuff
+app-keywords =
+about = About
+view = View
+welcome = Welcome to COSMIC! ✨
+page-id = Page { $num }
+git-description = Git commit {$hash} on {$date}
+example-row = Example Row
