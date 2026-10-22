@@ -6,13 +6,13 @@ use crate::pet::{Direction, FRAME_COUNT, Pet};
 use crate::tracker::cpu_tracker::{self, CpuTracker};
 use chrono::{DateTime, Local, TimeZone};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
-use cosmic::cosmic_theme::palette::num::Round;
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
-use cosmic::iced::program::graphics::Compositor;
 use cosmic::iced::{Alignment, Length, Padding, Subscription, window::Id};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
+use crate::reminders_helper::*;
+use crate::window_helper::*;
 
 /// Dog sprites facing left, in walk-cycle order.
 const SPRITES: [&[u8]; FRAME_COUNT] = [
@@ -120,11 +120,7 @@ pub enum Message {
 
 impl AppModel {
     fn reminders(&self) -> Vec<Reminder> {
-        self.config
-            .reminders
-            .iter()
-            .filter_map(Reminder::from_config)
-            .collect()
+        reminders_from_config(&self.config.reminders)
     }
 
     fn save_reminders(&mut self, reminders: Vec<(i64, String)>) {
@@ -154,19 +150,9 @@ impl AppModel {
         let anchor_w = size.round() as i32;
         let anchor_h = size.round() as i32;
 
-        let parent_panel = self
-            .core
-            .applet
-            .applet_window_id()
-            .or_else(|| self.core.main_window_id())
-            .expect("no parent panel window");
-
-
-
-
-                
-        let anchor_x = self.pet.position.round() as i32;
-        let anchor_y = 0;
+        let parent_panel = parent_panel_window_id(&self.core);
+        let anchor_rect = window_helper::rectangle_for_pet(self.pet.position, size);
+        
         let mut popup_settings = self
             .core
             .applet

@@ -5,6 +5,8 @@ mod config;
 mod i18n;
 mod pet;
 mod tracker;
+mod window_helper;
+mod reminders_helper;
 
 fn main() -> cosmic::iced::Result {
     // Get the system's preferred languages.
