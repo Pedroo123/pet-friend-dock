@@ -153,10 +153,10 @@ impl AppModel {
         let parent_panel = parent_panel_window_id(&self.core);
         let anchor_rect = rectangle_for_pet(self.pet.position, size);
 
-        let mut popup_settings = self
-            .core
-            .applet
-            .get_popup_settings(parent_panel, new_id, None, None, None);
+        let mut popup_settings =
+            self.core
+                .applet
+                .get_popup_settings(parent_panel, new_id, None, None, None);
 
         popup_settings.positioner.anchor_rect = anchor_rect;
         get_popup(popup_settings)
