@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::fl;
 use crate::pet::{Direction, FRAME_COUNT, Pet};
 use crate::tracker::cpu_tracker::{self, CpuTracker};
+use crate::window::window_helper::{parent_panel_window_id, rectangle_for_pet};
 use chrono::{DateTime, Local, TimeZone};
 use cosmic::cosmic_config::{self, CosmicConfigEntry};
 use cosmic::iced::platform_specific::shell::wayland::commands::popup::{destroy_popup, get_popup};
@@ -11,8 +12,6 @@ use cosmic::iced::{Alignment, Length, Padding, Subscription, window::Id};
 use cosmic::prelude::*;
 use cosmic::widget;
 use std::time::Duration;
-use crate::reminders_helper::*;
-use crate::window_helper::*;
 
 /// Dog sprites facing left, in walk-cycle order.
 const SPRITES: [&[u8]; FRAME_COUNT] = [
@@ -120,7 +119,11 @@ pub enum Message {
 
 impl AppModel {
     fn reminders(&self) -> Vec<Reminder> {
-        reminders_from_config(&self.config.reminders)
+        self.config
+            .reminders
+            .iter()
+            .filter_map(Reminder::from_config)
+            .collect()
     }
 
     fn save_reminders(&mut self, reminders: Vec<(i64, String)>) {
@@ -147,31 +150,15 @@ impl AppModel {
         self.popup.replace(new_id);
 
         let size = self.sprite_size();
-        let anchor_w = size.round() as i32;
-        let anchor_h = size.round() as i32;
-
         let parent_panel = parent_panel_window_id(&self.core);
-        let anchor_rect = window_helper::rectangle_for_pet(self.pet.position, size);
-        
-        let mut popup_settings = self
-            .core
-            .applet
-            .get_popup_settings(
-                parent_panel,
-                new_id,
-                None,
-                None,
-                None,
-            );
+        let anchor_rect = rectangle_for_pet(self.pet.position, size);
 
+        let mut popup_settings =
+            self.core
+                .applet
+                .get_popup_settings(parent_panel, new_id, None, None, None);
 
-        popup_settings.positioner.anchor_rect = cosmic::iced::Rectangle {
-            x: anchor_x,
-            y: anchor_y,
-            width: anchor_w,
-            height: anchor_h,
-        };
-
+        popup_settings.positioner.anchor_rect = anchor_rect;
         get_popup(popup_settings)
     }
 
